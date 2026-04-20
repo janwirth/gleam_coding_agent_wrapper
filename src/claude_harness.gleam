@@ -1,6 +1,8 @@
-import gleam/bit_array
+import child_process
+import child_process/stdio
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode.{type Decoder}
+import gleam/erlang/process.{type Subject}
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -24,27 +26,36 @@ pub type Error {
   NonZeroExit(code: Int)
 }
 
-type Port
-
-type Next {
-  Line(BitArray)
-  Partial(BitArray)
+type Msg {
+  Line(String)
   Exit(Int)
 }
-
-@external(erlang, "claude_harness_ffi", "start")
-fn ffi_start(cwd: String, prompt: String) -> Result(Port, String)
-
-@external(erlang, "claude_harness_ffi", "next")
-fn ffi_next(port: Port) -> Next
 
 pub fn start_claude(
   config: Config,
   on_event: fn(Event) -> Nil,
 ) -> Result(RunResult, Error) {
-  case ffi_start(config.cwd, config.prompt) {
-    Error(msg) -> Error(SpawnFailed(msg))
-    Ok(port) -> drain(port, <<>>, State("", None), on_event)
+  let subj: Subject(Msg) = process.new_subject()
+
+  let stdio_cfg =
+    stdio.lines(fn(line) { process.send(subj, Line(line)) })
+    |> stdio.on_exit(fn(code) { process.send(subj, Exit(code)) })
+
+  let builder =
+    child_process.from_name("claude")
+    |> child_process.cwd(config.cwd)
+    |> child_process.args([
+      "-p",
+      config.prompt,
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--dangerously-skip-permissions",
+    ])
+
+  case child_process.spawn(builder, stdio_cfg) {
+    Error(e) -> Error(SpawnFailed(start_error_to_string(e)))
+    Ok(_proc) -> drain(subj, State("", None), on_event)
   }
 }
 
@@ -53,18 +64,12 @@ type State {
 }
 
 fn drain(
-  port: Port,
-  buf: BitArray,
+  subj: Subject(Msg),
   state: State,
   on_event: fn(Event) -> Nil,
 ) -> Result(RunResult, Error) {
-  case ffi_next(port) {
-    Line(bin) -> {
-      let full = <<buf:bits, bin:bits>>
-      let state = handle_line(full, state, on_event)
-      drain(port, <<>>, state, on_event)
-    }
-    Partial(bin) -> drain(port, <<buf:bits, bin:bits>>, state, on_event)
+  case process.receive_forever(subj) {
+    Line(s) -> drain(subj, handle_line(s, state, on_event), on_event)
     Exit(n) -> finalize(state, n)
   }
 }
@@ -79,14 +84,13 @@ fn finalize(state: State, exit_code: Int) -> Result(RunResult, Error) {
 }
 
 fn handle_line(
-  bin: BitArray,
+  s: String,
   state: State,
   on_event: fn(Event) -> Nil,
 ) -> State {
-  case bit_array.to_string(bin) {
-    Error(_) -> state
-    Ok("") -> state
-    Ok(s) ->
+  case s {
+    "" -> state
+    _ ->
       case json.parse(s, stream_decoder()) {
         Error(_) -> state
         Ok(msg) -> apply_msg(msg, state, on_event)
@@ -177,5 +181,18 @@ fn block_decoder() -> Decoder(ContentBlock) {
       decode.success(BlockTool(name, input))
     }
     _ -> decode.success(BlockOther)
+  }
+}
+
+fn start_error_to_string(e: child_process.StartError) -> String {
+  case e {
+    child_process.FileNotFound(s) -> "file not found: " <> s
+    child_process.FileNotExecutable(s) -> "not executable: " <> s
+    child_process.OutOfMemory -> "out of memory"
+    child_process.OsProcessLimitReached -> "os process limit"
+    child_process.OsFileLimitReached -> "os file limit"
+    child_process.CommandTooLong -> "command too long"
+    child_process.NotEnoughFileDescriptors -> "not enough fds"
+    child_process.RuntimeLimitReached -> "runtime limit"
   }
 }
