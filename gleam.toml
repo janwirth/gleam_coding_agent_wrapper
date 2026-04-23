@@ -1,4 +1,4 @@
-name = "claude_harness"
+name = "gleam_coding_agent_wrapper"
 version = "1.0.0"
 
 [dependencies]

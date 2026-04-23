@@ -1,20 +1,17 @@
-# claude_harness
+# gleam_coding_agent_wrapper
 
-[![Package Version](https://img.shields.io/hexpm/v/claude_harness)](https://hex.pm/packages/claude_harness)
-[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/claude_harness/)
+Gleam wrappers around coding-agent CLIs. Currently exposes a single public
+module: `claude` — embed the `claude` CLI as a BEAM subprocess and stream
+its events.
 
-```sh
-gleam add claude_harness@1
-```
 ```gleam
-import claude_harness
+import claude
 
 pub fn main() -> Nil {
-  // TODO: An example of the project in use
+  // see SPEC.md
+  Nil
 }
 ```
-
-Further documentation can be found at <https://hexdocs.pm/claude_harness>.
 
 ## Development
 

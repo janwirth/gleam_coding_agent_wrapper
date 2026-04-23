@@ -1,6 +1,8 @@
-# claude_harness — Spec
+# gleam_coding_agent_wrapper — Spec
 
-Gleam lib. Embed `claude` CLI as BEAM subprocess. Stream events. Terminate on final message.
+Gleam lib. Embed coding-agent CLIs as BEAM subprocesses, stream events,
+terminate on final message. Currently the only public module is `claude`,
+which wraps the `claude` CLI.
 
 ## Flow
 
@@ -53,7 +55,7 @@ Unknown types: ignore.
 
 ## Test CLI
 
-`gleam run -m claude_harness/cli -- <prompt>` (cwd = pwd).
+`gleam run -m claude/cli -- <prompt>` (cwd = pwd).
 
 Output: one line per event, no prefix/color/decor. Flushed as it arrives.
 
@@ -66,7 +68,7 @@ result  <is_error>  <cost_usd>  <final text, one line>
 
 ## Unit test
 
-`test/claude_harness_test.gleam` — gated on `CLAUDE_BIN` env (skip if unset).
+`test/gleam_coding_agent_wrapper_test.gleam` — gated on `CLAUDE_BIN` env (skip if unset).
 
 Case: `start_claude(Config(cwd: tmp, prompt: "Think briefly, then reply with the single word PONG."))`.
 
