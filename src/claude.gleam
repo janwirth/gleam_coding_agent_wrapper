@@ -99,14 +99,19 @@ pub fn start_claude(
     False -> #("claude", args)
   }
   let builder =
-    child_process.from_name(command)
+    child_process.from_name("sh")
     |> child_process.cwd(config.cwd)
-    |> child_process.args(args)
+    |> child_process.args([
+      "-c",
+      "exec \"$@\" </dev/null",
+      "empress-agent",
+      command,
+      ..args
+    ])
 
   case child_process.spawn(builder, stdio_cfg) {
     Error(e) -> Error(SpawnFailed(start_error_to_string(e)))
     Ok(proc) -> {
-      child_process.close(proc)
       drain(subj, config.cancel, proc, State("", None), on_event)
     }
   }
