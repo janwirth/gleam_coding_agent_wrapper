@@ -30,7 +30,10 @@ pub type Model {
 /// where a stable alias exists; pin to a specific version otherwise.
 pub fn models() -> List(Model) {
   [
-    Model(label: "Codex", id: "codex"),
+    Model(label: "Codex default", id: "codex"),
+    Model(label: "Codex GPT-6.1 Sol", id: "codex:gpt-6.1-sol"),
+    Model(label: "Codex GPT-6 Astra", id: "codex:gpt-6-astra"),
+    Model(label: "Codex GPT-6 Luna", id: "codex:gpt-6-luna"),
     Model(label: "Claude Opus", id: "opus"),
     Model(label: "sonnet", id: "sonnet"),
     Model(label: "haiku", id: "haiku"),
@@ -73,7 +76,7 @@ pub fn start_claude(
     stdio.lines(fn(line) { process.send(subj, Line(line)) })
     |> stdio.on_exit(fn(code) { process.send(subj, Exit(code)) })
 
-  let is_codex = config.model == Some("codex")
+  let is_codex = is_codex_model(config.model)
   let base_args = [
     "-p",
     config.prompt,
@@ -395,19 +398,40 @@ fn start_error_to_string(e: child_process.StartError) -> String {
 }
 
 /// Codex exec accepts prompts as one argument, without shell interpolation.
+pub fn is_codex_model(model: Option(String)) -> Bool {
+  case model {
+    Some("codex") -> True
+    Some(id) -> string.starts_with(id, "codex:")
+    None -> False
+  }
+}
+
 pub fn codex_args(config: Config) -> List(String) {
   let prompt = case config.append_system_prompt {
     Some(sp) -> sp <> "\n\n" <> config.prompt
     None -> config.prompt
   }
+  let settings = [
+    "-c",
+    "agents.default_subagent_reasoning_effort=\"low\"",
+    "-c",
+    "agents.max_concurrent_threads_per_session=2",
+  ]
+  let settings = case config.model {
+    Some("codex:" <> id) -> ["--model", id, ..settings]
+    _ -> settings
+  }
   case config.resume {
-    None -> ["exec", "--json", "--sandbox", "workspace-write", prompt]
+    None ->
+      list.append(
+        ["exec", "--json", "--sandbox", "workspace-write", ..settings],
+        [prompt],
+      )
     Some(sid) -> [
       "exec",
       "resume",
       "--json",
-      string.replace(sid, "codex:", ""),
-      prompt,
+      ..list.append(settings, [string.replace(sid, "codex:", ""), prompt])
     ]
   }
 }
