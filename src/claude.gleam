@@ -6,6 +6,7 @@ import gleam/erlang/process.{type Subject}
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 
 pub type Config {
   Config(
@@ -29,7 +30,8 @@ pub type Model {
 /// where a stable alias exists; pin to a specific version otherwise.
 pub fn models() -> List(Model) {
   [
-    Model(label: "opus", id: "opus"),
+    Model(label: "Codex", id: "codex"),
+    Model(label: "Claude Opus", id: "opus"),
     Model(label: "sonnet", id: "sonnet"),
     Model(label: "haiku", id: "haiku"),
   ]
@@ -71,6 +73,7 @@ pub fn start_claude(
     stdio.lines(fn(line) { process.send(subj, Line(line)) })
     |> stdio.on_exit(fn(code) { process.send(subj, Exit(code)) })
 
+  let is_codex = config.model == Some("codex")
   let base_args = [
     "-p",
     config.prompt,
@@ -91,14 +94,21 @@ pub fn start_claude(
     Some(m) -> ["--model", m, ..args_with_sp]
     None -> args_with_sp
   }
+  let #(command, args) = case is_codex {
+    True -> #("codex", codex_args(config))
+    False -> #("claude", args)
+  }
   let builder =
-    child_process.from_name("claude")
+    child_process.from_name(command)
     |> child_process.cwd(config.cwd)
     |> child_process.args(args)
 
   case child_process.spawn(builder, stdio_cfg) {
     Error(e) -> Error(SpawnFailed(start_error_to_string(e)))
-    Ok(proc) -> drain(subj, config.cancel, proc, State("", None), on_event)
+    Ok(proc) -> {
+      child_process.close(proc)
+      drain(subj, config.cancel, proc, State("", None), on_event)
+    }
   }
 }
 
@@ -142,11 +152,7 @@ fn finalize(state: State, exit_code: Int) -> Result(RunResult, Error) {
   }
 }
 
-fn handle_line(
-  s: String,
-  state: State,
-  on_event: fn(Event) -> Nil,
-) -> State {
+fn handle_line(s: String, state: State, on_event: fn(Event) -> Nil) -> State {
   case s {
     "" -> state
     _ -> {
@@ -165,6 +171,36 @@ fn apply_msg(
   on_event: fn(Event) -> Nil,
 ) -> State {
   case msg {
+    CodexItem(kind, id, text, input, failed) -> {
+      case kind {
+        "agent_message" -> on_event(AssistantText(text))
+        "reasoning" -> on_event(AssistantThinking(text))
+        "error" -> on_event(AssistantText(text))
+        "command_execution" -> on_event(ToolResult(id, text, failed))
+        "file_change" -> on_event(ToolUse("file change", id, input))
+        "mcp_tool_call" -> on_event(ToolResult(id, text, failed))
+        _ -> Nil
+      }
+      State(..state, final: case kind {
+        "agent_message" -> Some(#(state.session_id, text, False, 0.0))
+        _ -> state.final
+      })
+    }
+    CodexDone(failed) -> {
+      on_event(Finished(failed, 0.0))
+      State(
+        ..state,
+        final: Some(#(
+          state.session_id,
+          case state.final {
+            Some(#(_, text, _, _)) -> text
+            None -> ""
+          },
+          failed,
+          0.0,
+        )),
+      )
+    }
     Sys(sid, model) -> {
       on_event(SystemInit(sid, model))
       State(..state, session_id: sid)
@@ -203,6 +239,14 @@ type StreamMsg {
   Usr(content: List(UserBlock))
   Res(session_id: String, text: String, is_error: Bool, cost: Float)
   MsgOther
+  CodexItem(
+    kind: String,
+    id: String,
+    text: String,
+    input: Dynamic,
+    failed: Bool,
+  )
+  CodexDone(failed: Bool)
 }
 
 type ContentBlock {
@@ -220,6 +264,22 @@ type UserBlock {
 fn stream_decoder() -> Decoder(StreamMsg) {
   use t <- decode.field("type", decode.string)
   case t {
+    "thread.started" -> {
+      use sid <- decode.field("thread_id", decode.string)
+      decode.success(Sys("codex:" <> sid, "codex"))
+    }
+    "turn.completed" -> decode.success(CodexDone(False))
+    "turn.failed" -> decode.success(CodexDone(True))
+    "error" -> {
+      use message <- decode.optional_field(
+        "message",
+        "Codex error",
+        decode.string,
+      )
+      decode.success(Asst([BlockText(message)]))
+    }
+    "item.started" -> codex_item_decoder(False)
+    "item.completed" -> codex_item_decoder(True)
     "system" -> {
       use sub <- decode.optional_field("subtype", "", decode.string)
       case sub {
@@ -326,5 +386,54 @@ fn start_error_to_string(e: child_process.StartError) -> String {
     child_process.CommandTooLong -> "command too long"
     child_process.NotEnoughFileDescriptors -> "not enough fds"
     child_process.RuntimeLimitReached -> "runtime limit"
+  }
+}
+
+/// Codex exec accepts prompts as one argument, without shell interpolation.
+pub fn codex_args(config: Config) -> List(String) {
+  let prompt = case config.append_system_prompt {
+    Some(sp) -> sp <> "\n\n" <> config.prompt
+    None -> config.prompt
+  }
+  case config.resume {
+    None -> ["exec", "--json", "--sandbox", "workspace-write", prompt]
+    Some(sid) -> [
+      "exec",
+      "resume",
+      "--json",
+      string.replace(sid, "codex:", ""),
+      prompt,
+    ]
+  }
+}
+
+fn codex_item_decoder(completed: Bool) -> Decoder(StreamMsg) {
+  use item <- decode.field("item", decode.dynamic)
+  case
+    decode.run(item, {
+      use kind <- decode.field("type", decode.string)
+      use id <- decode.optional_field("id", "", decode.string)
+      use message <- decode.optional_field("message", "", decode.string)
+      use text <- decode.optional_field("text", message, decode.string)
+      use output <- decode.optional_field(
+        "aggregated_output",
+        text,
+        decode.string,
+      )
+      use status <- decode.optional_field("status", "", decode.string)
+      decode.success(#(kind, id, output, status))
+    })
+  {
+    Ok(#(kind, id, text, status)) ->
+      case completed, kind {
+        False, "command_execution" ->
+          decode.success(Asst([BlockTool("shell", id, item)]))
+        False, "mcp_tool_call" ->
+          decode.success(Asst([BlockTool("MCP", id, item)]))
+        False, _ -> decode.success(MsgOther)
+        True, _ ->
+          decode.success(CodexItem(kind, id, text, item, status == "failed"))
+      }
+    Error(_) -> decode.success(MsgOther)
   }
 }
