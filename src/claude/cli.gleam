@@ -3,7 +3,6 @@ import claude
 import gleam/float
 import gleam/int
 import gleam/io
-import gleam/option.{None}
 import gleam/string
 
 pub fn main() {
@@ -15,7 +14,7 @@ pub fn main() {
 }
 
 fn run(cwd: String, prompt: String) -> Nil {
-  let cfg = claude.Config(cwd, prompt, None, None, None, None)
+  let cfg = claude.config(cwd, prompt)
   case claude.start_claude(cfg, print_event) {
     Ok(r) ->
       io.println(

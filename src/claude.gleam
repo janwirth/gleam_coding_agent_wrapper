@@ -3,6 +3,7 @@ import child_process/stdio
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode.{type Decoder}
 import gleam/erlang/process.{type Subject}
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -15,7 +16,23 @@ pub type Config {
     resume: Option(String),
     append_system_prompt: Option(String),
     model: Option(String),
+    /// Sending to it stops the run: the CLI and everything it started (its tools).
     cancel: Option(Subject(Nil)),
+    /// More `claude` flags, e.g. `["--tools", "", "--system-prompt", "…"]`. Not passed to Codex.
+    extra_args: List(String),
+  )
+}
+
+/// A run with defaults: no resume, no system prompt, the CLI's default model, no cancel.
+pub fn config(cwd: String, prompt: String) -> Config {
+  Config(
+    cwd:,
+    prompt:,
+    resume: None,
+    append_system_prompt: None,
+    model: None,
+    cancel: None,
+    extra_args: [],
   )
 }
 
@@ -84,6 +101,7 @@ pub fn start_claude(
     "stream-json",
     "--verbose",
     "--dangerously-skip-permissions",
+    ..config.extra_args
   ]
   let args_with_resume = case config.resume {
     Some(sid) -> ["--resume", sid, ..base_args]
@@ -115,13 +133,18 @@ pub fn start_claude(
   case child_process.spawn(builder, stdio_cfg) {
     Error(e) -> Error(SpawnFailed(start_error_to_string(e)))
     Ok(proc) -> {
-      drain(subj, config.cancel, proc, State("", None), on_event)
+      drain(subj, config.cancel, proc, State("", None, ""), on_event)
     }
   }
 }
 
 type State {
-  State(session_id: String, final: Option(#(String, String, Bool, Float)))
+  State(
+    session_id: String,
+    final: Option(#(String, String, Bool, Float)),
+    /// The last line that was not stream JSON: the CLI's error when it ends without a result.
+    complaint: String,
+  )
 }
 
 fn drain(
@@ -145,17 +168,30 @@ fn drain(
       drain(subj, cancel, proc, handle_line(s, state, on_event), on_event)
     Exit(n) -> finalize(state, n)
     Cancel -> {
-      child_process.kill(proc)
+      kill_group(proc)
       Error(Canceled)
     }
   }
+}
+
+/// Kills the CLI's process group (killing the CLI alone leaves its tools running).
+/// Erlang starts every port program as a process group leader, so the group id is its pid.
+fn kill_group(proc: child_process.Process) -> Nil {
+  case child_process.os_process_id(proc) {
+    Ok(pid) -> {
+      let _ = child_process.shell("kill -KILL -" <> int.to_string(pid))
+      Nil
+    }
+    Error(_) -> Nil
+  }
+  child_process.kill(proc)
 }
 
 fn finalize(state: State, exit_code: Int) -> Result(RunResult, Error) {
   case state.final, exit_code {
     Some(#(sid, t, e, c)), 0 -> Ok(RunResult(sid, t, e, c))
     Some(#(sid, t, _, c)), _ -> Ok(RunResult(sid, t, True, c))
-    None, 0 -> Ok(RunResult(state.session_id, "", True, 0.0))
+    None, 0 -> Ok(RunResult(state.session_id, state.complaint, True, 0.0))
     None, n -> Error(NonZeroExit(n))
   }
 }
@@ -166,7 +202,7 @@ fn handle_line(s: String, state: State, on_event: fn(Event) -> Nil) -> State {
     _ -> {
       on_event(RawLine(s))
       case json.parse(s, stream_decoder()) {
-        Error(_) -> state
+        Error(_) -> State(..state, complaint: s)
         Ok(msg) -> apply_msg(msg, state, on_event)
       }
     }
